@@ -1,0 +1,300 @@
+可插拔仿生注意力 第七版（2026-09-16）
+
+本次变化
+第一版把视听、记忆当作注意力的"支持证据"，真正的交互判断仍散落在下游：Brain 里的
+GazeInvitation（无声邀请）和 DialogueContinuity.resolve（转头回答）各写了一套场景规则。
+第二版把记忆上下文和当前语境文本与视听一起交给注意力统一计算，这些场景不再需要各自的
+代码分支，而是同一套融合更新的自然结果；两个特例模块已删除。
+第三版补上跨会话熟悉度来源，并把记忆通道整体挂到识别置信度上——记忆里的一切都属于某个身份，
+身份不可靠时那份历史就不该替当前这个人说话。
+第四版做三件事：建立统一订阅点（Global Workspace），补上 Reynolds-Heeger 归一化与 Selective Tuning
+抑制环（作为可切换的 v2 算法），并按识别精度对注意力的影响升级声纹/人脸模型。
+第五版按用户给的理论链把剩下的缺口补齐：归一化池跨模态耦合、workspace 级 soft-WTA + 有限容量 + 紧急抢占、
+记忆可以自己产生候选（内源性注意）、Brain 的目标反向成为 top-down bias、人脸走商用路线的质量增强。
+第六版回答「新层能不能兼容掉旧层」。实测发现一个真实的洞：走过来看着机器人说话——最基本的情况——
+交流意愿层渐近值只有 0.7013，永远到不了 0.72，全靠 InteractionFusion 的离散快通道撑着。
+补法不是调权重，是补结构：视听也需要 phasic（起始）通道，并且「说话」必须与「面向我们」相乘而不是取较大者。
+第七版接入表情与手势——两者进的是不同的层，因为它们回答不同的问题：
+手势（招手/叫人/摆手拒绝）是明确的交互意图，进交流意愿层的 phasic 通道；
+表情不进交流意愿层（见谁笑就搭话是错的），而是作为工作区的内源性候选，回答「谁看起来需要我开口」。
+
+这是功能仿生工程模型。权重是先验，没有做过现场 ROC 标定；论文里的成功率不能搬来当本机准确率。
+
+一、两件事被解耦
+1) 输入源解耦
+   注意力持续接收各系统的输出，8092 面板"注意力输入源与算法"可逐项勾选：
+   - audio_visual   视听感知：注视、朝向、唇动、声源、声纹。
+   - memory_context 记忆上下文：本会话近期参与者、正在进行的对话对象、还在等谁回答。
+   - linguistic_context 当前语境文本：称呼形式、问句/应答句式、与机器人参与过的对话的词面延续。
+   - cross_session_memory 跨会话熟悉度：从 hri-memory-service 读这个人在以往会话里真实发生过多少次交谈。
+     后台单线程查询、快循环只读缓存；4 个不同的历史会话记为完全熟悉（工程饱和点，不是人类熟悉度阈值）。
+     查不到（服务不可达）与没记录是两种状态，前者根本不出现在结果里，不会被当成"陌生人"。
+   - internal_state 内部状态：默认关闭，当前没有生产者，缺失时标记 missing，不生成心理数值。
+   取消勾选是把该通道的证据从计算中消融，不是关闭摄像头、麦克风或安全反射。
+   选择写入 .run/attention-config.json，重启后保留；ATTENTION_SOURCES 仍是初始默认。
+
+2) 算法解耦
+   算法是独立 .so，通过 C ABI 加载，面板可在运行中切换：
+   - av_memory_language_v1（默认）自上而下项与自下而上驱动相加后平方归一化。参考实现。
+   - av_memory_language_v2 自上而下作为乘性注意场调制刺激后再归一化（Reynolds-Heeger），
+     并对选中目标的方位邻域做抑制（Selective Tuning）。交流意愿层与 v1 完全相同（共享 attention_common.hpp）。
+   - builtin_audio_visual_v1（内置对照基线）只有视听竞争，没有交流意愿层。
+   v1 与 v2 跑同一套行为用例且全部通过；v2 在模型依据上更贴近原论文，但两者优劣未经现场对比，
+   所以默认仍是 v1。要比较就在同一段录像上切换，看目标振荡、误打断、身份误绑，而不是看谁分数高。
+   ABI 头文件 include/robot_attention_perception/attention_plugin_abi.h：
+   attention_plugin_abi_version / attention_plugin_struct_size / attention_plugin_manifest /
+   attention_plugin_create / attention_plugin_update / attention_plugin_destroy。
+   定长 POD 结构，无跨边界分配；主机启动时逐个核对 sizeof，布局不一致直接报错而不是读脏数据。
+   候选和帧都带通用键值扩展数组，将来加输入（例如内部状态服务的新字段）不必改结构顺序。
+   插件不能授予说话或动作许可，不能创建未观测到的人，不能改写身份。
+   编译：bash scripts/build_attention_plugins.sh
+   缺少 .so 时不阻断启动：自动回退内置基线，面板显示加载错误，并注明"无交流意愿层"。
+
+二、算法本身
+第一层 归一化竞争（与原实现相同的连续公式）
+   每模态独立归一化、习惯化/恢复/返回抑制、实际 dt、焦点滞回。
+   切换到新插件不改变"看哪里、听哪个声源"。
+
+第二层 按人累积的交流意愿（新增，取代下游场景规则）
+   交流意愿是人的属性，不是某条传感器轨迹的属性：同一个人的人脸候选和声纹候选合并成一个信念。
+   对数几率 L 按 dL/dt = -L/τ + drive 精确积分（τ=1.2s）：
+   - 视听与记忆是连续输入（tonic）
+       drive = coupling * (0.76*视听 + 2.76*记忆) - 1.6*反向证据
+       coupling = 0.4 + 0.6*该候选的注意力强度（被注意的证据才更多地累积）
+       视听 = max(注视*朝向, 唇动*发声)
+       记忆 = (0.45*等待其回答 + 0.30*正在对话 + 0.25*近期参与者*时间衰减 + 0.15*跨会话熟悉度) × 识别置信度
+   - 语境是每句一次的脉冲输入（phasic），靠 event_id 保证只施加一次
+       +1.5 句首点名
+       +1.4 应答句式 × max(等待其回答, 正在对话) × 识别置信度   ← 语言与记忆的合取
+       +0.6 延续机器人参与过的话题
+       +0.35 问句（未称呼他人时）
+       -1.4 称呼另一个人
+   交流意愿 = sigmoid(L)，阈值：0.55 观察，0.72 交流。
+   状态：IDLE / OBSERVING / ENGAGED / INVITED / EXPECTED_ANSWER。
+
+三、原来的特殊 case 如何被覆盖
+   两人聊天后一人转头看机器人
+     记忆给"近期参与者"，视听给持续注视，无反向语境 → 约 1.4 秒越过阈值 → INVITED。
+     注意力输出 addressed_to_robot=false（他没说话），Brain 据此开口接话。
+   单人自言自语后看过来
+     同一条路径，与人数无关；自言自语期间注视低，意愿不过阈值，只记忆不回答。
+   机器人问完、对方转头回答
+     记忆给"等待其回答"，语境给应答句式，两者合取产生脉冲 → EXPECTED_ANSWER，
+     一句之内放行，不要求保持视线。声纹仍需 ≥0.6，混合/重叠/回声仍被拒。
+   句中提到"机器人"、或在叫另一个人
+     句首点名才计分；称呼他人是负证据。
+   陌生人长时间盯着看
+     只有视听通道，渐近值 0.66 < 0.72，永远不会变成邀请。
+   以往常聊、但本次会话还没开口的人回来看着机器人
+     跨会话熟悉度给弱先验，约 2.3 秒越过阈值（当前会话参与者约 1.4 秒），陌生人仍然不会。
+     顺序是刻意的：真实互动记录越多，一次沉默注视越可能是邀请。
+   声纹或人脸匹配不可靠的人，说了一句像回答的话
+     记忆通道整体按识别置信度缩放，语言的"应答"脉冲同样缩放，所以不会替别人认领我们问的问题。
+   以上都在 tests/cpp_attention_plugin_test.cpp、tests/test_engagement_gate.py 和
+   scripts/verify_attention_algorithm.py 里有对应用例。
+
+三点三、按理论链逐条对照（第五版补齐后）
+   Itti-Koch 自下而上显著性      已有：salience（注视×朝向 / 语音概率×清晰度）+ surprise（声学突变）+ change_id
+   Biased Competition            已有：goal/importance/motivation 偏置同一套竞争；v2 用乘性注意场
+   Reynolds-Heeger 除性归一化    v2 已有，且归一化池跨模态耦合（κ=0.35），不再是两个模态各自归一化
+   Selective Tuning              v2 方位抑制环（感知层）+ workspace 的 soft-WTA 与非赢家压制（认知层）
+                                 层级选择未做：候选空间是扁平的 person/track/object，没有真正的 part-whole 层级，
+                                 硬套只会得到空架子。等以后真有层级结构再说。
+   IOR                           已有：焦点切换时 inhibition=1.0，exp(-dt/1.5) 衰减
+   Habituation / Dishabituation  已有：exposure 驱动的精确解 ODE；change_id 触发去习惯化
+   Persistence / Hysteresis      已有：enter .25 / hold .15 / margin .08
+   Urgency 抢占                  已有：惊跳事件以 urgency=1 进入 workspace，越过容量限制
+   GWT / LIDA                    广播 + soft-WTA + 有限容量（4）+ 非感知候选参与竞争
+   Memory -> Attention           已有：memory_candidates.py，记忆可自己产生候选（见下）
+   Brain -> Attention            已有：attention_memory.goals 作为 top-down bias（见下）
+   Internal state                接口在，无生产者，默认关闭
+
+三点四、统一订阅点（Global Workspace）
+   robot_attention_perception/global_workspace.py 是这套循环的「广播」步骤，只发布竞争结果，不做任何决策。
+   每个感知周期发布一份内容：cycle 单调递增、focus、target、engagement、coalition（本轮有效候选按强度排序）、
+   sources 状态、算法与标定标记、provenance（utterance_id / transition_id / 决策日志路径 / 熟悉度查询状态）。
+   三个消费入口：
+     GET  /api/workspace              最新一份 + 订阅者/丢帧统计
+     GET  /api/workspace?since=N      回放 N 之后的周期（有界历史 64 条）
+     GET  /api/workspace/stream       SSE 推送，每周期一条，另有心跳
+     ROS  /attention/workspace        同样内容的 JSON 字符串
+   订阅者落后会丢帧并计数，绝不阻塞感知循环。Brain 现有 /attention/brain_input 通路未改动，
+   这是给以后的大脑和其他系统用的统一入口。
+   「工作区内容」= 本轮竞争的胜出者与依据，不是意识。
+   工作区的赢家里，非感知那部分（memory_event / affect_event）现在通过 state 和 brain_input 的
+   workspace_events 交给 Brain，Brain 用与无声邀请相同的门槛决定是否开口——这条链路之前是断的。
+   只有 admitted 的候选会被交出去：被容量压制掉的候选没有进来，就不能当作进来过。
+   工作区自己也是一层竞争，做插件做不到的两件事：
+   1) 非感知候选也参与。记忆事件没有模态也没有方位，进不了插件里的分模态竞争，
+      但它完全可能是此刻最值得想的事。插件决定「看哪听哪」，工作区决定「什么值得大脑处理」。
+   2) 只有少数赢家通过。soft-WTA（share = a^2 / Σa^2）在有限容量（4）里分配，
+      其余标 suppressed_over_capacity——这是 Selective Tuning 压制非赢家在认知层的对应物。
+      urgency ≥ 0.7 的事件越过容量限制直接进入，不排队（惊跳走这条）。
+
+三点四之二、内源性注意：记忆自己产生候选
+   memory_candidates.py。这是全系统唯一「不是任何人正在做的事」也能驱动注意力的地方，
+   也因此最容易变成骚扰，所以按用户选择做成保守版：
+   - 只有明确未完成的事才算：机器人问了但过期没被回答的问题（Brain 的 ExpectedAnswer 记录过期）。
+     没有话题联想、没有「这让我想起」——那需要一个本系统没有的相关性模型。
+   - 同一件事只提一次；每 5 分钟最多一次；必须有相关的那个人在场；必须安静 3 秒以上；超过 30 分钟就不再提。
+   - 每一次拒绝都记原因（nobody_present / room_is_busy / rate_limited / nothing_unfinished…），可在 8092 看到。
+   - 它只是把候选放进工作区竞争，说不说仍然由 Brain 决定。ATTENTION_MEMORY_EVENTS=0 可整体关闭。
+
+三点四之二点五、手势与表情：进不同的层
+   手势 → 交流意愿层（phasic）
+     招手/叫人是视觉版的叫名字：有意图、离散、作为稳态没有意义，所以和语言脉冲同构。
+     extra 键 gesture_invite / gesture_reject，主机在手势首次被识别的那一帧发一次。
+     招手 +2.2×分数×朝向（只在确实转向我们的程度上算）；摆手拒绝 −2.4×分数，权重更高，
+     因为把「别烦我」认错的代价更大。实测：招手维持约 1.6 秒 ENGAGED，摆手直接压到 0。
+     脉冲只施加一次，但 reason 位保留 3 秒，否则日志说不出「为什么信念跳了」。
+   表情 → 工作区内源性候选（affect_candidates.py），不进交流意愿层
+     理由：交流意愿回答「他是不是在跟我说话」，表情在这个问题上是弱证据，
+     掺进去会让机器人见谁笑就上去搭话。而「他是不是需要我开口」是另一个问题，表情正是关于它的。
+     条件：20 秒窗口内 ≥12 个分类器自己标为 valid 的样本、其中 ≥60% 为负面、
+     已安静 ≥20 秒、人在场且识别置信度 ≥0.5、每人每 10 分钟最多一次。
+     负载里给出样本数、负面占比、平均 valence、安静时长，措辞是「表情持续偏低」而不是断言他的心情。
+     ATTENTION_AFFECT_EVENTS=0 可关闭。
+   两者都不授予说话许可：手势改变的是竞争中的信念，表情产生的是一个候选，说不说仍由 Brain 决定。
+   另外，人离开一段时间后再出现会触发去习惯化（change_id="return:<人>:<时刻>"，缺席 ≥3 秒），
+   回来本身就是变化，应该重新变得显著。
+
+三点四之三、Brain 的目标作为 top-down bias
+   Brain snapshot 的 attention_memory.goals：awaiting_answer / holding_floor / deferred_turn / greet_owner，
+   每条带 person_id、strength、expires_ms。注意力把它转成该人的 importance（上限 1.0），过期即失效。
+   目标只偏置竞争，不授予听话许可，也不能创造未观测到的人（有测试固定这两条）。
+   Brain 另外订阅了 /attention/workspace 供追溯；它当前仍按 /attention/brain_input 行动，通路未改。
+
+三点六、新层为什么原先兼容不掉旧层，以及怎么补的
+   实测（离散快通道对照）：
+     只是盯着看            渐近 0.6661   不该越阈值，正确
+     看着机器人并说话       渐近 0.7013   低于 0.72，永远达不到 —— 而离散路径 120ms 就放行
+   两个结构性原因：
+   1) 连续层只有 tonic 通道，τ=1.2s，物理上产生不了一两百毫秒的响应。调任何权重都无济于事。
+   2) e_av = max(注视×朝向, 唇动×发声) 把「只是看」(0.81) 和「看着并说话」(1.0) 压得太近，
+      一个权重无法同时让后者过线、前者不过线。
+   补法：
+   1) 视听 phasic 通道。唇音同步的「起始」是事件不是稳态，与语言脉冲同构：
+      新增 extra 键 av_sync_onset，主机在绑定成立且 gaze≥.65 / body≥.6 的那一帧发一次，
+      插件施加 1.3 × 注视×朝向×唇动×发声 的脉冲。只是看 → 无起始 → 无脉冲。
+   2) tonic 改为相乘而非取大：e_av = 注视×朝向 × (1 + 0.95 × 唇动×发声)。
+      「对我们说话」只在「面向我们」成立的程度上才算关于我们的证据。
+   结果：
+     走过来看着机器人说话   50ms 达到 ENGAGED，稳态 0.7960（比离散路径的 120ms 更快）
+     只是盯着看            0.6661 不变，无回归
+     旁人说话但没看机器人    IDLE（相乘使其降到 0.05 量级，取大时是 0.708，非常接近阈值）
+   现在离散路径 2/3/4/7（点名、注视+唇音同步、叫名窗口、播报中保持目标）在决策上已经冗余；
+   反射/惊跳那条保留，因为它必须在插件加载失败时仍然有效，这是安全属性不是理论缺口。
+   离散路径仍在做的另一件事是「绑定」（哪条声轨、哪张脸、source_track_id、adopt 视觉目标），
+   那不是重复裁决，finalize_gate 依赖它，无论如何都要有人做。
+   本轮只做到「新层有能力」，没有删除离散路径：删除是行为变更，应该在一次现场数据之后再做。
+
+三点五、这套机制的定位（自下而上 + 自上而下的显著性竞争）
+   第一层就是经典意义上的显著性竞争：
+     自下而上（外界刺激）= salience（注视×朝向、语音概率×清晰度）、surprise（声学突变）、句首唤醒词；
+     自上而下（已有记忆/目标）= goal（正在进行的对话目标）、importance（主人先验、近期参与者）、
+                                motivation（内部状态，当前关闭）；
+     竞争 = 每模态除性归一化 + 习惯化 + 返回抑制（Itti&Koch 显著度、Desimone&Duncan 偏向竞争的工程化）。
+     它回答的是"看哪里、听哪个"。
+   第二层不是显著性竞争，而是按人做的序贯证据累积（对数几率漂移），回答的是
+   "这个人是不是在跟我交流"。自下而上与自上而下都往里送证据，但输出是一个信念而不是一个位置。
+   经典显著度文献不涵盖这一层，它来自参与状态与听话人判定这条线（Bohus&Horvitz、Katzenmaier、Mallidi）。
+   注意"当前语境文本"并不是纯自下而上：原始 ASR 文本是外界刺激，但把"是的"理解成回答，
+   必须靠自上而下的记忆（我刚才问了谁什么）。所以实现上是 应答句式 × 待回答记忆 的合取，
+   而不是两路各自加分。唯一完全不依赖自上而下的通道是句首唤醒词。
+   内部状态将来接入时，位置已经留好：第一层作为 arousal 增益与 motivation，第二层可作为额外的连续通道。
+
+四、下游改动
+   Attention：attention.engagement = {state, person_id, confidence, reasons}，随每帧输出；
+             INVITED 产生 interaction_phase=INVITED（listen=true，addressed_to_robot=false），
+             EXPECTED_ANSWER 产生 LISTENING（addressed_to_robot=true），finalize_gate 照常按同期证据定最终句。
+   Brain：新增 attention_trigger.py，只消费 engagement 状态并判断自己是否有空开口；
+          dialogue_continuity.py 改为 ExpectedAnswer，只负责"我问了谁什么、还没被回答"这一记忆事实，
+          通过 /brain/state 的 attention_memory 交给注意力，不再自己判断谁在回答。
+          Brain 仍然在被放行后把"我问过的那句话"附给千问，因为只有 Brain 知道自己说过什么。
+   brain/gaze_invitation.py 与 tests/test_gaze_invitation.py 已删除，运行时不再有任何场景分支。
+
+五、记忆存储与识别精度
+   注意力快循环用的是 Brain 的工作记忆快照（本会话近期参与者、当前对话对象、待回答），
+   不做长期语义检索，也不在 50ms 循环里调用大模型，这是刻意的。
+   跨会话熟悉度由后台 worker 查 hri-memory-service，快循环只读缓存，同样不阻塞。
+   pacific-rim/module/service/memory_v2_service 的能力（DuckDB 事实源、实体图、向量召回）
+   当前没有接入，也不需要接入快循环；将来若要更强的跨会话先验，继续作为独立来源接入，不改算法 ABI。
+   本次新增用的是 ABI v1 就预留的通用键值扩展位（memory_familiarity），没有改任何结构体布局，
+   已编译的旧插件可以照常加载并忽略这个键。
+
+   模型（2026-09-16 已替换，旧声纹/人脸档案按用户指示清空，备份在 ~/Golands/.identity-backup-*）：
+   - 声纹 CampPlus -> ERes2NetV2（3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx，192 维，
+     sherpa-onnx 可直接加载）。3 秒语音本机实测 14.1ms -> 53.9ms，句末计算，不在关键路径。
+     CNCeleb EER 6.78% -> 6.14%，短句（2–3 秒）差距更大，而本系统大量是短句。
+     用 6 个 macOS 中文音色 × 4 句做过离线分数分布测量：两个模型的冒充者上限都在 0.70、
+     同音色下限都在 0.85，尺度接近，所以原阈值 0.48/0.6 可以沿用而不会出现行为断崖。
+     注意这是合成语音，同音色一致性远高于真人，不能当作现场 EER；真人 ROC 仍未做。
+     脚本：voice-detection/scripts/measure_speaker_thresholds.py
+   - 人脸按用户选择走商用路线：默认保持 sface（Apache-2.0），另加质量门槛与多帧模板，
+     这是用许可干净但较弱的后端把有效精度拿回来的主要手段：
+     · face_quality()：尺寸 ≥72px、检测分 ≥0.85、yaw ≤40°/pitch ≤30°、拉普拉斯方差 ≥25，
+       任何一项不过就不更新模板、也不做身份判断，返回 unknown 并给出原因，而不是猜一个。
+     · TemplateTracker：同一张脸最近 5 帧合格嵌入取均值再匹配。单帧嵌入是有噪声的，均值不是；
+       测试用例固定的正是「均值比任一单帧更接近真实方向」这一条。
+   - 人脸可切换后端 vision-detection/scripts/face_embedder.py：
+     sface（默认，OpenCV Zoo，Apache-2.0，128 维，5.7ms/张）与
+     arcface（buffalo_l w600k_r50，512 维，25.5ms/张含对齐，IJB-C TAR@FAR=1e-4 约 95–96%）。
+     默认没有改成 arcface，只因为它的权重与训练数据仅限非商业研究用途，而本系统的用途尚未确定；
+     确定是研究/内部使用后，--face-backend arcface 或 VISION_FACE_BACKEND=arcface 即可启用。
+     两个后端的阈值都未在真人数据上标定，切换后需要重新标。
+   - 身份识别加了 300ms 节流（VISION_IDENTITY_INTERVAL_MS），按人脸位置缓存，
+     身份本来就不会逐帧变化；这让 arcface 的成本从每帧降到每 300ms 一次。
+
+   识别精度与注意力的耦合点只有一个，就是记忆通道整体乘以识别置信度：
+   记忆里的一切都挂在身份上，身份不可靠时那份历史就不该替当前这个人说话。
+   声纹/人脸模型换得更准，直接表现为记忆通道更早、更稳地起作用；
+   反过来，识别退化时系统会自动退回"只靠视听与唤醒词"，而不是张冠李戴。
+   身份的角色（主人/熟人/陌生人）不进入交流意愿层：那是权限与内容问题，属于 Brain。
+   注意力里起作用的是"测到的互动历史"（熟悉度）与"识别置信度"，不是被赋予的头衔。
+   角色仍然保留在第一层的 importance（主人先验 0.5，影响看哪里，不影响是否算在跟我说话）。
+
+六、验证
+   Attention 164 项、Brain 62 项、Vision 23 项、C++ 4 个测试目标（核心 + v1/v2 同一套行为用例 + 抑制环）、
+   8092 页面 DOM 全部通过。
+   scripts/verify_attention_algorithm.py 用真实来源适配器 + 真实 .so + 真实融合跑九个离线场景
+   （含关闭记忆来源的消融、跨会话熟悉度、识别不可靠三组对照），不开摄像头、麦克风和网络。
+   brain/gaze_invitation.py 及其测试已按用户确认删除。
+   模型延迟均为本机 M4 Pro CPU 实测，非现场端到端保证。
+   以上都只说明合成输入下的程序行为，现场误打断率、身份误绑、阈值 ROC 仍未标定。
+   本轮未开启采集；162 远端 Qwen 未改动。
+
+七、研究依据
+1. Katzenmaier, Stiefelhagen & Schultz 2004, Identifying the addressee in human-human-robot
+   interactions based on head pose and speech. ICMI. doi:10.1145/1027933.1027959
+   头部朝向与所说内容结合判断"这句话说给谁"。本版把语境文本与视听放进同一次融合的直接依据。
+2. Mallidi et al. 2018, Device-directed Utterance Detection. Interspeech.
+   doi:10.21437/Interspeech.2018-1531
+   声学嵌入 + ASR 文本 + 解码特征的分数级后融合显著优于任一单通道。支持"语言与记忆合取"的做法；
+   注意该工作是有监督训练模型，本实现是未标定的先验加权，不能引用其 EER。
+3. Bohus & Horvitz 2009, Models for Multiparty Engagement in Open-World Dialog. SIGDIAL.
+   https://aclanthology.org/W09-3933/
+   把参与状态作为持续的隐状态而不是瞬时规则。对应本版的交流意愿累积与状态机。
+4. Breazeal & Scassellati 1999, A context-dependent attention system for a social robot.
+   显著度 + 习惯化 + 动机调制。对应第一层与将来的内部状态输入。
+5. Eldardeer et al. 2021, A Biological Inspired Cognitive Framework for Memory-Based
+   Multi-Sensory Joint Attention in HRI. Front. Neurorobot. doi:10.3389/fnbot.2021.648595
+   工作记忆进入注意力闭环。对应 memory_context 只取工作记忆而非长期检索。
+6. Ruesch et al. 2008, Multimodal saliency-based bottom-up attention: a framework for the
+   humanoid robot iCub. ICRA.
+   模块化、分布式的多模态注意力框架。对应本版的来源插拔与算法插件工程结构。
+7. Ferreira & Dias 2014, Attentional Mechanisms for Socially Interactive Robots – A Survey.
+   IEEE TAMD. doi:10.1109/TAMD.2014.2303072
+   社交机器人注意力机制的模块划分综述。对应"来源/算法分离"的工程边界。
+8. Itti & Koch 2001, Computational modelling of visual attention. Nat. Rev. Neurosci. 2(3):194-203.
+   自下而上显著度与除性归一化。对应第一层的 salience 与归一化竞争形式，本实现是工程化简化版。
+9. Desimone & Duncan 1995, Neural mechanisms of selective visual attention.
+   Annu. Rev. Neurosci. 18:193-222.
+   偏向竞争：自上而下的目标偏置同一套竞争，而不是另开一条通路。对应 goal/importance 的接入方式。
+10. Reynolds & Heeger 2009, The normalization model of attention. Neuron 61(2):168-185.
+   注意力是乘在刺激驱动上的增益场，再做除性归一化。对应 v2 的第一层；v1 的相加式是它的近似。
+11. Tsotsos et al. 1995, Modeling visual attention via selective tuning.
+   Artificial Intelligence 78:507-545.
+   胜者选出后抑制其邻域，把选中对象与相邻干扰物分开。对应 v2 的方位抑制环（工程改写，非原架构复现）。
+12. Baars 1988 / Franklin & Patterson 2006, LIDA 与全局工作空间理论。
+   感知、记忆、目标竞争进入一个广播内容再分发给各消费者。对应 global_workspace.py，
+   但这里只实现了广播这一步，不声称实现了意识或完整认知周期。

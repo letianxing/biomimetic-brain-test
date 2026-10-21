@@ -1,0 +1,28 @@
+单人语境连续性与情绪语音方案（2026-09-16）
+
+已实现
+1. 无声转向不限于多人：一个人先自言自语，再持续看向机器人，可用真实近期记忆+注意力邀请让Qwen回应。
+2. 不伪造ASR。触发为attention_trigger，内容由Qwen判断；语境不足可轻柔确认。
+3. 机器人已实际播放完一个问题后，保留10秒同一说话人的预期回答。用户转头说“是的”或其他补充，可以带上一问与原话题继续回答。
+4. 同一可靠声纹、非回声、非不可分离重叠、没有明确指向另一人才延续；其他人介入或超时撤销。保留observed_attention和dialogue_link解释依据。
+5. 这是有证据的会话连续性，不是把“是的”永远当唤醒词。相似声纹错认仍可能影响正确性，须现场验收。
+
+研究参考及边界
+- Bohus & Horvitz: Facilitating Multiparty Dialog with Gaze, Gesture, and Speech (2010)
+  https://www.microsoft.com/en-us/research/publication/facilitating-multiparty-dialog-gaze-gesture-speech/
+  支持研究视听线索与多人会话协调，不等于提供本项目可直接部署的模型。
+- Jovanovic等: A corpus for studying addressing behavior in multi-party dialogues (2005)
+  https://www.isca-archive.org/sigdial_2005/jovanovic05_sigdial.html
+  标注对话行为、听话人、相邻问答和注视，可用于设计联合特征和评测。
+- Akhtiamov等: Speech and Text Analysis for Multimodal Addressee Detection (2017)
+  https://www.isca-archive.org/interspeech_2017/akhtiamov17_interspeech.html
+  结合语音/文本判断交流对象；ASR质量会影响判断。
+不存在本次已验证的“融合现有所有传感器+长期记忆即可完全解决”的单篇模型；当前为研究启发的工程实现。
+
+情绪TTS：已核实选型，尚未部署/切换
+Qwen3-TTS-12Hz-1.7B-CustomVoice官方支持Chinese、speaker和instruct，可控制语气/情绪。官方Serena描述为warm gentle young female voice，适合温柔中文年轻女声；Vivian较明亮。
+代码/文档：https://github.com/QwenLM/Qwen3-TTS
+当前仍用macOS Tingting。文本温柔不等于实际具有可控情绪音色。
+建议协议：Qwen对话结果提供text + delivery（warm/comfort/curious等表达意图）；TTS把delivery映射到instruct，speaker固定Serena；不根据用户表情诊断心理。
+合成音频继续交给当前Voice播放，保持turn_id、cancel、实际AEC参考和淡出；不把情绪标签念出来。
+pacific-rim/tts_service当前缺引擎文件与明确取消/结束协议，不能直接替换。新增模型需要单独验证CUDA资源、首音频延迟、音色和取消，不挤占现有Qwen优先服务。

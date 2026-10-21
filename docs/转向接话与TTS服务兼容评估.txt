@@ -1,0 +1,34 @@
+转向接话与tts_service兼容评估（2026-09-16）
+
+一、当前已覆盖场景
+多人互相聊天：仍保存逐句身份和内容，注意力未对机器人放行时不插话。
+A转向机器人并发言：当前ASR和结构化近期对话、历史记忆、身份/背景共同交给千问，自主理解承接，不按问题模板指定答案。
+A转向机器人但未发言：新gaze_invitation模块检查最近90秒同一讨论至少两个可靠说话人、A属于参与者/当时可见参与者、VISUAL_FOCUS持续1.5秒、环境安静1秒、没有正在回复/待答问题后，提交非语言邀请事件。
+无声邀请正文保持空，不伪造成ASR；给模型attention_trigger=possible_invitation_not_spoken_question。模型可自然接续观点，也可轻柔询问是否需要意见。
+同一讨论同一目标去重，刚有直接提问不补发邀请。开始说话、丢失注意力锁定会取消待发出的无声回应，明确新问题优先。
+主人普通出现问候仍沿用5秒等待；多人讨论后的无声邀请是单独场景，不等于主人一出现就问候。
+界面新增“转向邀请加入讨论”事件和无声输入描述，保留实际model_context。
+
+二、实际验证范围
+自动测试覆盖资格条件、无声邀请去重、单人/讲话/busy不触发、最近直接提问不重复回复，以及真实上下文进入模型请求。
+远端Qwen样本：A说三点北门并约带饼干，B说带柠檬水；A问自己该带什么，回答“你带饼干呀，记得吗？”；仅无声邀请时回答“我在，需要我一起加入吗？”。仅两个非播放样本，不代表现场成功率。
+当前仍依赖ASR、身份与注视结果；识别错误可影响话题和触发。多人同时重叠完整逐字识别仍有限。
+
+三、pacific-rim/module/service/tts_service核查
+可借鉴能力：中文数字/日期文本标准化、拼音纠音、模型情绪参数、PCM帧发布、跨片段crossfade配置。
+现有公开接口：订阅/tts_text（robo_brain_service/msg/String）；发布/tts_service/tts_audio（tts_service/msg/AudioFrame）。AudioFrame含header、sample_rate、channels、encoding、interleaved、float32[] data，输出归一化浮点PCM。
+当前S2S：Brain拥有文本/轮次/取消，Mac say分句生成PCM16，由Voice播放并产出实际播放回声参考和淡出。
+推荐协作方式：tts_service只替代合成器，音频通过协议桥进入Voice既有播放器，维持实际AEC参考和Brain取消所有权。禁止两个播放器同时播音。
+
+四、不能现在直接替换的具体原因
+- 当前工作区node.py导入tts.adapters.tts_engine，但tts/adapters/tts_engine.py实际缺失。README描述模型启动，并不能证明当前checkout可运行。
+- 现有String输入没有明确request_id/turn_id/cancel/结束控制；AudioFrame没有显式sequence/end/cancelled。header.frame_id的含义需要双方正式约定，不能擅自冒充唯一轮次标识。
+- 模型要求NVIDIA GPU、模型LFS文件及运行时验证，Mac当前环境不能直接跑该CUDA合成服务。
+- 当前Voice playback/start是完整PCM片段启动，每帧都调用start会停掉前一帧；需要有界append/finish桥和序号/代次隔离，再接流式输出。
+- 数字转拼音适合该模型输入，不能直接喂给Mac say，否则可能读出拼音。
+
+五、下一步兼容接口建议
+Synthesize请求：turn_id/request_id/text/emotion；音频：request_id/sequence/sample_rate/channels/PCM/is_final；控制：cancel(request_id)及确认。
+按pacific-rim AGENTS，IDL不能手工改，必须通过Dashboard或./pr data-format，再生成绑定。
+本轮没有改写IDL、没有导入调用其他服务业务代码、没有部署一个缺核心引擎的服务。当前可靠Mac TTS继续使用。
+补齐核心引擎和上述协议后，可实现桥接并对比首包延迟、跨片段连续性、取消后尾音、回声污染及音色；未验证前不切默认后端。

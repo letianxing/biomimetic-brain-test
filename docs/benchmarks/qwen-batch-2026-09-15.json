@@ -1,0 +1,56 @@
+[
+  {
+    "batch": 2048,
+    "ubatch": 1024,
+    "run": 0,
+    "ttft_ms": 5188.4,
+    "total_ms": 5492.9,
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 1720,
+      "prompt_ms": 5180.895,
+      "prompt_per_token_ms": 3.012148255813954,
+      "prompt_per_second": 331.98897101755585,
+      "predicted_n": 12,
+      "predicted_ms": 304.448,
+      "predicted_per_token_ms": 27.677090909090907,
+      "predicted_per_second": 36.13096489384066
+    }
+  },
+  {
+    "batch": 2048,
+    "ubatch": 1024,
+    "run": 1,
+    "ttft_ms": 109.1,
+    "total_ms": 414.6,
+    "timings": {
+      "cache_n": 1716,
+      "prompt_n": 4,
+      "prompt_ms": 102.672,
+      "prompt_per_token_ms": 25.668,
+      "prompt_per_second": 38.959015116097866,
+      "predicted_n": 12,
+      "predicted_ms": 305.406,
+      "predicted_per_token_ms": 27.764181818181818,
+      "predicted_per_second": 36.01762899222674
+    }
+  },
+  {
+    "batch": 2048,
+    "ubatch": 1024,
+    "run": 2,
+    "ttft_ms": 110.4,
+    "total_ms": 414.1,
+    "timings": {
+      "cache_n": 1716,
+      "prompt_n": 4,
+      "prompt_ms": 103.228,
+      "prompt_per_token_ms": 25.807,
+      "prompt_per_second": 38.74917657999768,
+      "predicted_n": 12,
+      "predicted_ms": 303.626,
+      "predicted_per_token_ms": 27.602363636363634,
+      "predicted_per_second": 36.22878146140317
+    }
+  }
+]

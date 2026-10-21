@@ -1,0 +1,92 @@
+一、一键启动（推荐）
+
+打开终端，执行：
+
+cd ~/Golands/biomimetic-brain-test
+bash scripts/start_all.sh
+
+先检查162的Qwen，然后自动启动：Docker/ROS2、Memory、Vision、Voice、Attention、Brain；自动开始Mac摄像头和内置麦克风采集，并打开8092实时总览。
+等终端显示“启动完成”再测试。系统询问摄像头/麦克风权限时选择允许。
+默认会话：mac-conversation-test；默认多人模式：Baseline。声音输出使用系统默认设备，测试时选择MacBook Pro扬声器。
+
+如果使用MicArray阵列，把启动命令换成：
+
+bash scripts/start_all.sh --profile sipeed_6_plus_1_usb_array --device MicArray
+
+停止全部（另一个终端执行，或在启动终端按Ctrl-C）：
+
+bash ~/Golands/biomimetic-brain-test/scripts/stop_all.sh
+
+查看状态：
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh status
+
+主面板：http://127.0.0.1:8092（实时画面、情绪/手势、ASR/VAD、TTS、历史记忆与回溯）。
+页面上方可分别切换摄像头、麦克风。原始面板：8080视觉、8090声音、8094决策。
+日志：~/Golands/biomimetic-brain-test/.run/mac-stack/
+首次注册：一人面对摄像头说“你好小圆，我叫小天，请记住我，我是你的主人。”（换成自己的称呼），等待口头确认；不需要操作网页。
+普通熟人去掉“我是你的主人”。详细测试：同目录“现场注册与验收.txt”。
+一键启动与下面分别启动二选一；如果旧脚本还在运行，先在旧终端Ctrl-C停止。
+
+
+二、分别启动（按顺序，每条命令放一个终端）
+
+1. Qwen远端模型（162的0号4090），端口18050
+
+远端已设为常驻服务，本机无需再启动模型。检查：
+curl --noproxy '*' http://172.16.60.162:18050/health
+
+需要恢复服务时：
+ssh user@172.16.60.162 'systemctl --user restart robo-qwen9.service'
+
+模型：Qwen3.5-9B-Q4_K_M.gguf；context=4096，parallel=1。
+
+2. Docker / ROS2 Jazzy / rosbridge，端口9090
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh ros
+
+3. HRI记忆服务，端口8788
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh memory
+
+4. 视觉服务与全部视觉模型，端口8080
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh vision
+
+自动加载：YOLOv8n目标检测、YuNet人脸检测、SFace身份识别、FER+情绪、MediaPipe Face嘴唇关键点、MediaPipe Hand手势。
+
+5. 声音服务与全部默认声音模型，端口8090
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh voice
+
+自动开始Mac内置麦克风采集，加载：Sherpa Zipformer中文流式ASR、CampPlus声纹、VAP轮次预测、AST音乐检测、Wav2Vec2十类曲风模型。
+BPM、节拍、声音角度和快反射由音频算法计算，不需要额外启动模型服务。
+
+备用ASR（替换上面voice命令，三选一，不要同时运行）：
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh voice --asr whisper
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh voice --asr vosk
+
+whisper模式加载Whisper base，并用Vosk提供流式结果；vosk模式只用Vosk识别。
+可选SpeakerBeam：先按“现场注册与验收.txt”注册说话人，再在8090选择SpeakerBeam TSE并点击Start；自动按需加载REAL-TSE spk_emb_causal_100。多人完整记忆测试保持Baseline。
+使用阵列时，在voice命令后加：--profile sipeed_6_plus_1_usb_array --device MicArray
+
+6. 注意力服务，端口8092
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh attention
+
+7. 仿生测试大脑，端口8094
+
+bash ~/Golands/biomimetic-brain-test/scripts/start_component.sh brain
+
+自动连接http://172.16.60.162:18050/v1/chat/completions的Qwen；回复使用macOS Tingting中文声音，经Voice播放并提供回声参考，无需另外启动TTS服务。
+所有分开启动的服务使用同一套模型路径、端口和会话配置。
+
+全部启动后检查：
+
+cd ~/Golands/biomimetic-brain-test
+python3 scripts/check_mac_conversation.py
+
+停止：各终端Ctrl-C，或者执行第一块中的stop_all.sh一次停止全部受管服务。
+
+远端Qwen不由本机stop_all.sh停止。本机使用本地Qwen仅在明确覆盖BRAIN_LLM_BASE_URL为127.0.0.1时启用。

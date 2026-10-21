@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.launcher.pid
+.env
+
+.run/
+
+# Local runtime database and conversation data
+data/
+.DS_Store

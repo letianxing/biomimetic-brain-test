@@ -1,0 +1,41 @@
+162慢脑与声纹池部署记录
+2026-09-15
+
+远端部署已完成
+主机：172.16.60.162，用户user，目录/home/user/robo-model。
+代码git clone自ssh://git@code.xdreamdev.com:2222/xdream/robo-model.git，HEAD b2063cacf3807f973ee4ef55815edd43e1299619。
+推理源码由本机已验证llama.cpp源代码打包传输，在third_party/llama-cuda编译CUDA Release，compute capability89。不是使用Mac二进制。
+模型Qwen3.5-9B-Q4_K_M.gguf，SHA256 cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13。
+只使用0号4090，33/33层GPU卸载，Flash Attention on，context4096，parallel1，batch2048/ubatch1024。
+服务systemd --user robo-qwen9.service，用户linger已开启，SSH退出后保持运行，失败自动重启。
+接口http://172.16.60.162:18050/v1/chat/completions，model=qwen3.5-9b。
+按用户授权停止GPU0占用进程2780260（TERM无效后KILL）；它也占GPU1少量显存，随该进程释放。GPU1其他两个进程未停止。
+凭据不保存到代码或文档。
+
+验证
+健康检查ok，/v1/models正确，本机到162实际调用通过。
+1720token、cache_n=0：首字274.4ms，prompt处理230.6ms、7458.8token/s，生成约128.3token/s。
+本机Brain客户端简单记忆问题：首字181.0ms，总文本255.8ms。是样本结果，不保证所有请求相同速度。
+
+启动管理
+Mac一键启动自动使用远端，先检查远端健康，不启动本机Qwen。
+本机stop_all不停止远端。
+远端重启：ssh user@172.16.60.162 'systemctl --user restart robo-qwen9.service'
+远端状态：ssh user@172.16.60.162 'systemctl --user status robo-qwen9.service --no-pager'
+日志：/home/user/robo-model/.run/qwen-4090.log
+如需回到Mac，显式设置BRAIN_LLM_BASE_URL=http://127.0.0.1:18050/v1/chat/completions。
+
+声纹池
+模型仍为中文CampPlus，单模板旧档案自动兼容；每Person最多8份样本，保留原始anchor。
+匹配使用池内前两名加权，跨Person最佳与次佳间隔至少0.06，避免相近身份随意择一。
+正式注册不允许把远离原身份锚点的样本覆盖过去。
+自动扩充要求同一人高置信人脸、同期声纹、足够时长、低回声/低重叠、较高声纹分数与身份间隔。受控加入，不凭单次弱声纹自训练。
+存储使用原子文件替换。声纹分数仍不是准确率，缺真实标注样本，无法给出现场准确率百分比。
+
+多人分离现状
+已新增--tse multi显式实验模式：完成的语音段逐个登记参考提取、独立声纹验证、再ASR；每路同时间段有独立utterance_id，失败不冒认真人。
+目前本地预算最多4份干净参考、语音段不超过12秒；不是任意人数逐字实时分离。原始混合ASR保留在last_tse.mixed_asr供核对。
+已有3个声纹档案没有参考音频；不能由向量还原原话。新正式注册会保存每人的参考路径；启用multi前至少两份干净登记参考。
+真实模型离线测试：5秒混合音频，首次单路8.37秒（含加载），后续单路1.64秒；只验证模型运行，未获得真人识别准确率。
+离线入口：voice-detection/scripts/transcribe_overlap.py 输入.wav --output 结果.json。
+完整人际对话对象识别仍不能保证；当前明确称呼/已加入群体的群体提问规则和视觉/注意力证据有效，代词与背对摄像头等场景仍保留unknown。
